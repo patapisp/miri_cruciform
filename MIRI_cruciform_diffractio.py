@@ -14,11 +14,13 @@ from diffractio.utils_drawing import draw_several_fields
 from diffractio.scalar_masks_XY import Scalar_mask_XY
 from diffractio.scalar_sources_XY import Scalar_source_XY
 
-from diffractio.utils_math import ndgrid
+#from diffractio.utils_math import ndgrid
 
 import matplotlib.cm as cm
 
 import time
+import os
+os.chdir("/Users/polychronispatapis/Documents/Projects/miripsf/miri_cruciform")
 
 # IR absorption model
 
@@ -31,10 +33,58 @@ def IR_absorption(I0, lam, t=35*1E-4):
 def PixelGrid_absorption():
     return (1-(27**2-25**2)/27**2)
 
+def lrs_detector_dispersion(wavelength):
+    return -3*wavelength**2 + 16.96*wavelength + 69.32
+
 wav_data,reflectance = np.genfromtxt('data/SW_ARcoat_reflectance.txt', skip_header=4, usecols=(0, 1), delimiter=',', unpack=True)
 Rl = interp1d(wav_data,reflectance)
 wavs = np.linspace(2., 26, num=100)
 
+def fresnel_r_from_angles(n1, n2, theta):
+    # theta: incidence angle inside medium n1
+    # returns complex r_s, r_p
+    # Snell
+    sin_t = np.minimum(1, n1/n2 * np.sin(theta))
+    # Handle TIR: when argument >1, set cos_t to imaginary
+    cos_i = np.cos(theta)
+    arg = 1 - (n1/n2*np.sin(theta))**2
+    cos_t = np.sqrt(arg + 0j)  # allow complex
+
+    r_s = (n1*cos_i - n2*cos_t) / (n1*cos_i + n2*cos_t)
+    r_p = (n2*cos_i - n1*cos_t) / (n2*cos_i + n1*cos_t)
+    return r_s, r_p
+
+def fresnel_reflect_field(E, wavelength, n1, n2, dx, polarization='unpolarized'):
+    Ny, Nx = E.shape
+    k0 = 2*np.pi/wavelength
+
+    E_k = np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(E)))
+
+    fx = np.fft.fftshift(np.fft.fftfreq(Nx, d=dx))
+    fy = np.fft.fftshift(np.fft.fftfreq(Ny, d=dx))
+    FX, FY = np.meshgrid(fx, fy)
+    kx = 2*np.pi*FX
+    ky = 2*np.pi*FY
+    k_parallel = np.sqrt(kx**2 + ky**2)
+
+    sin_theta = np.clip(k_parallel / (k0 * n1), -1, 1)
+    theta = np.arcsin(sin_theta)
+
+    r_s, r_p = fresnel_r_from_angles(n1, n2, theta)
+
+    if polarization == 'unpolarized':
+        Es_k = E_k/np.sqrt(2)
+        Ep_k = E_k/np.sqrt(2)
+        E_ref_k = Es_k*r_s + Ep_k*r_p
+    elif polarization == 's':
+        E_ref_k = E_k * r_s
+    elif polarization == 'p':
+        E_ref_k = E_k * r_p
+    else:
+        raise ValueError("polarization must be 'unpolarized', 's', or 'p'")
+
+    E_ref = np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(E_ref_k)))
+    return E_ref
 
 
 class MIRICruciform:
@@ -69,6 +119,7 @@ class MIRICruciform:
         self.dispersion_angle = 0.
 
     def intialise_wavefront(self):
+        self.dispersion(target_wave=self.wavelength, mode=self.mode)
         self.u0 = Scalar_source_XY(x=self.x0, y=self.y0, wavelength=self.wavelength)
         self.t0 = Scalar_mask_XY(x=self.x0, y=self.y0, wavelength=self.wavelength)
         self.u0.plane_wave(theta=0.0 * degrees, phi=self.dispersion_angle * degrees)
@@ -84,8 +135,8 @@ class MIRICruciform:
         # detector grid
         self.dg = Scalar_mask_XY(x=self.x0, y=self.y0, wavelength=self.wavelength)
         self.dg.grating_2D(period=27 * um,
-                      amin=1.,
-                      amax=1.,
+                      a_min=1.,
+                      a_max=1.,
                       phase=np.pi,
                       r0=(0, 0),
                       fill_factor=fill)
@@ -136,13 +187,13 @@ class MIRICruciform:
         return propagation_angle
 
 
-    def dispersion(self, central_wave, target_wave, mode="IMA"):
+    def dispersion(self, target_wave, mode="IMA"):
         if mode == "MRS":
             self.dispersion_angle = 0.0
         elif mode in ["LRS-SLTSS", "LRS-SLT"]:
-            central_wave = 5
-            dtheta = 0.4
-            self.dispersion_angle = dtheta*np.floor((target_wave-central_wave)/res(target_wave))
+            fl = self.focal_ratios[mode]*1e6 # in um            
+            central_wave = 8.4*um
+            self.dispersion_angle = ((target_wave*um-central_wave)*lrs_detector_dispersion(target_wave)*25*um/fl)/degrees
         else:
             self.dispersion_angle = 0.0
         return
@@ -210,10 +261,17 @@ class MIRICruciform:
         u4ar.clear_field()
         u4ar.WPM()
 
-        self.internal_total_reflection(tr_radius=tr_radius)
+        #self.internal_total_reflection(tr_radius=tr_radius)
+        _tmp = u4ar.to_Scalar_field_XY(iz0=-1)
+        dx = float(self.x0[1] - self.x0[0])
+        E_ref = fresnel_reflect_field(_tmp.u, wavelength=self.wavelength, n1=3.4, n2=1.0, dx=dx, polarization='unpolarized')
+        _ref_field = Scalar_field_XY(x=self.x0, y=self.y0, wavelength=self.wavelength)
+        _ref_field.u = E_ref
         z0 = np.linspace( (self.distance_pupil_ar+1) * mm, (self.distance_pupil_ar+1.5) * mm, 16)
         u4 = Scalar_field_XYZ(x=self.x0, y=self.y0, z=z0, wavelength=self.wavelength, n_background=3.4)
-        u4.incident_field(u4ar.to_Scalar_field_XY(iz0=-1) * self.Rmask)
+        #u4.incident_field(u4ar.to_Scalar_field_XY(iz0=-1) * self.Rmask)
+        u4.incident_field(_ref_field)
+
         u4.clear_field()
         u4.WPM()
         u4 = u4.to_Scalar_field_XY(iz0=-1)
@@ -225,10 +283,16 @@ class MIRICruciform:
         u5ar.clear_field()
         u5ar.WPM()
 
-        self.internal_total_reflection(tr_radius=tr_radius)
+        #self.internal_total_reflection(tr_radius=tr_radius)
+        _tmp = u5ar.to_Scalar_field_XY(iz0=-1)
+        dx = float(self.x0[1] - self.x0[0])
+        E_ref = fresnel_reflect_field(_tmp.u, wavelength=self.wavelength, n1=3.4, n2=1.0, dx=dx, polarization='unpolarized')
+        _ref_field = Scalar_field_XY(x=self.x0, y=self.y0, wavelength=self.wavelength)
+        _ref_field.u = E_ref
         z0 = np.linspace((self.distance_pupil_ar + 2.) * mm, (self.distance_pupil_ar + 2.5) * mm, 16)
         u5 = Scalar_field_XYZ(x=self.x0, y=self.y0, z=z0, wavelength=wavelength, n_background=3.4)
-        u5.incident_field(u5ar.to_Scalar_field_XY(iz0=-1) * self.Rmask)
+        #u5.incident_field(u5ar.to_Scalar_field_XY(iz0=-1) * self.Rmask)
+        u5.incident_field(_ref_field)
         u5.clear_field()
         u5.WPM()
         u5 = u5.to_Scalar_field_XY(iz0=-1)
@@ -267,8 +331,27 @@ class MIRICruciform:
             uf += uwebb
             uc1 += (ucruci1)
             uc2 += (ucruci2)
-        return ufc, uf, uc1, uc2
-
+        return [ufc, uf, uc1, uc2]
+    
+    def LRSsim(self, wavelengths=np.linspace(5,12,num=10), detector_angle=0.0, tr_radius=0.0):
+        n = len(wavelengths)
+        ufc = 0
+        uf = 0
+        uc1 = 0
+        uc2 = 0
+        for i, wav in enumerate(wavelengths):
+            j = (i + 1) / n
+            sys.stdout.write('\r')
+            sys.stdout.write("[%-20s] %d%%" % ('=' * int(20 * j), 100 * j))
+            sys.stdout.flush()
+            utotal, uwebb, ucruci1, ucruci2 = self.monochromatic_cruciform(wavelength=wav, detector_angle=detector_angle,
+                                                                  tr_radius=tr_radius)
+            ufc += utotal  # transmission[i]* account for filter transmission
+            uf += uwebb
+            uc1 += (ucruci1)
+            uc2 += (ucruci2)
+        return [ufc, uf, uc1, uc2]
+    
     def plot_cruciform(self, components, filter, savepath=None, **kwargs):
         titles = [f"MIRI PSF: {filter}", "Webb PSF", "Cruciform 3rd pass", "Cruciform 5th pass"]
         fig, ax = plt.subplots(1, len(components), figsize=(12, 6))
@@ -302,17 +385,20 @@ class MIRICruciform:
 
     def runsim(self, filter="F560W", wavelength_points=10, tr_radius=150, detector_angle=0.0, plot=True, save=True,
                savepath="./simulations/"):
-        if filter not in self.filterfiles.keys():
+        if 'LRS' in filter:
+            print(f"Running Simulation for filter: {filter}")
+            psfs = self.LRSsim()
+        elif filter in self.filterfiles.keys():
+            print(f"Running Simulation for filter: {filter}")
+            psfs = self.MIRIFilter(wavelength_points=wavelength_points, tr_radius=tr_radius, filter=filter,
+                                   detector_angle=detector_angle)
+        else: 
             if float(filter) < 4 or float(filter) >25:
                 print(f"Value for wavelength={filter} not accepted")
                 raise ValueError
 
             psfs = self.monochromatic_cruciform(wavelength=float(filter), detector_angle=detector_angle,
                                                                   tr_radius=tr_radius)
-        else:
-            print(f"Running Simulation for filter: {filter}")
-            psfs = self.MIRIFilter(wavelength_points=wavelength_points, tr_radius=tr_radius, filter=filter,
-                                   detector_angle=detector_angle)
         if save:
             self.save_simulation(components=psfs, path=savepath, metadata={"filter": filter, "dettilt":detector_angle,
                                                                            "TIR": tr_radius})
@@ -325,19 +411,23 @@ class MIRICruciform:
 
 
 if __name__ == "__main__":
-    mr = MIRICruciform()
-    # Start a timer to keep track of runtime
+    mr = MIRICruciform(mode='LRS-SLTSS', 
+                       pupilfile="/Users/polychronispatapis/Documents/Projects/miripsf/miri_cruciform/data/JWpupil_segments_1024x1024.npy", 
+                       filterpath="/Users/polychronispatapis/Documents/Projects/miripsf/miri_cruciform/data/")
+    # psf = mr.monochromatic_cruciform()
+    # # Start a timer to keep track of runtime
     time0 = time.perf_counter()
-    mr.runsim(filter="F560W", wavelength_points=10, tr_radius=150, detector_angle=1.5)
-    mr.runsim(filter="F770W", wavelength_points=10, tr_radius=150, detector_angle=1.5)
+    # mr.runsim(filter="F560W", wavelength_points=10, tr_radius=150, detector_angle=1.5)
+    mr.runsim(filter="LRS-SLTSS", wavelength_points=10, tr_radius=150, detector_angle=1.5)
     # Print out the time benchmark
     time1 = time.perf_counter()
     print(f"Runtime so far: {time1 - time0:0.4f} seconds")
-    # mr.runsim(filter="monochromatic", wavelength_points=10, tr_radius=150, detector_angle=-1.5)
     # psf = mr.monochromatic_cruciform(wavelength=5.0, tr_radius=150)
-    # print("Finished running.")
     # plt.figure()
-    # plt.imshow(np.log10(psf[1]), origin="lower")
+    # plt.imshow((psf[2]), origin="lower", vmax=np.max(psf[2])*0.01)
+    # plt.show()
+    # plt.figure()
+    # plt.imshow((psf[3]), origin="lower", vmax=np.max(psf[3])*0.01)
     # plt.show()
 
 
