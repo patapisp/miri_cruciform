@@ -5,8 +5,9 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from astropy.io import fits
 import sys
+from pathlib import Path
 
-from diffractio import degrees, mm, plt, sp, um, np
+from diffractio import degrees, mm, sp, um
 from diffractio.scalar_fields_XY import Scalar_field_XY
 from diffractio.scalar_fields_XYZ import Scalar_field_XYZ
 from diffractio.scalar_masks_XYZ import Scalar_mask_XYZ
@@ -19,8 +20,11 @@ from diffractio.scalar_sources_XY import Scalar_source_XY
 import matplotlib.cm as cm
 
 import time
-import os
-os.chdir("/Users/polychronispatapis/Documents/Projects/miripsf/miri_cruciform")
+
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+DEFAULT_LRS_REFERENCE_WAVELENGTH = 8.4
+LRS_PIXEL_PITCH_UM = 25.0
 
 # IR absorption model
 
@@ -36,7 +40,29 @@ def PixelGrid_absorption():
 def lrs_detector_dispersion(wavelength):
     return -3*wavelength**2 + 16.96*wavelength + 69.32
 
-wav_data,reflectance = np.genfromtxt('data/SW_ARcoat_reflectance.txt', skip_header=4, usecols=(0, 1), delimiter=',', unpack=True)
+def lrs_detector_offset_pixels(wavelength, reference_wavelength=DEFAULT_LRS_REFERENCE_WAVELENGTH):
+    wavelength = np.asarray(wavelength, dtype=float)
+    return (wavelength - reference_wavelength) * lrs_detector_dispersion(wavelength)
+
+def lrs_slitless_dispersion_angle(wavelength, focal_length_um, reference_wavelength=DEFAULT_LRS_REFERENCE_WAVELENGTH,
+                                  pixel_pitch_um=LRS_PIXEL_PITCH_UM):
+    detector_offset_um = lrs_detector_offset_pixels(
+        wavelength=wavelength,
+        reference_wavelength=reference_wavelength,
+    ) * pixel_pitch_um
+    return detector_offset_um / float(focal_length_um) / degrees
+
+def stellar_blackbody_spectrum(wavelengths, temperature=6000.0):
+    wavelengths = np.asarray(wavelengths, dtype=float)
+    lam_m = wavelengths * 1e-6
+    h = 6.62607015e-34
+    c = 2.99792458e8
+    k_b = 1.380649e-23
+    exponent = h * c / (lam_m * k_b * temperature)
+    intensity = (2 * h * c**2) / (lam_m**5 * np.expm1(exponent))
+    return intensity / intensity.max()
+
+wav_data,reflectance = np.genfromtxt(DATA_DIR / 'SW_ARcoat_reflectance.txt', skip_header=4, usecols=(0, 1), delimiter=',', unpack=True)
 Rl = interp1d(wav_data,reflectance)
 wavs = np.linspace(2., 26, num=100)
 
@@ -92,19 +118,32 @@ class MIRICruciform:
     Code to simulate the MIRI cruciform pattern using diffraction and fresnel propagation
     """
 
-    def __init__(self, mode="IMA", simsize=2048, pupilfile="JWpupil_segments_1024x1024.npy", filterpath="./"):
+    def __init__(self, mode="IMA", simsize=2048, pupilfile=None, filterpath=None):
         self.mode = mode
         self.specR = {"LRS":50, "MRS":3000}
         self.focal_ratios = {"IMA": 7.0, "MRS": 3.0, "LRS-SLTSS": 7.0, "LRS-SLT": 7.0}
         self.diameter_mode = {"IMA": 1.0, "MRS":1.0, "LRS-SLTSS": 1.0, "LRS-SLT": 1.0}
         self.length_mode = {"IMA": 2.5, "MRS": 1.0, "LRS-SLTSS": 2.5, "LRS-SLT": 2.5}
         self.rotation = {"IMA": -4.8, "MRS": -7.7, "LRS-SLTSS": -4.8, "LRS-SLT": -4.8}
+        if pupilfile is None:
+            pupilfile = DATA_DIR / "JWpupil_segments_1024x1024.npy"
+        else:
+            pupilfile = Path(pupilfile)
+            if not pupilfile.is_absolute():
+                pupilfile = DATA_DIR / pupilfile
+        if filterpath is None:
+            filterpath = DATA_DIR
+        else:
+            filterpath = Path(filterpath)
+            if not filterpath.is_absolute():
+                filterpath = BASE_DIR / filterpath
         # load JWST pupil
         jwst_pupil = np.load(pupilfile)
         padlen = int((simsize - np.shape(jwst_pupil)[0])/2)
         self.jwst_pupil = np.pad(jwst_pupil, padlen, mode='constant')
         # plt.figure()
         # plt.imshow(jwst_pupil, origin="lower")
+        self.wavelength_um = 5.0
         self.wavelength = 5.0 * um
         self.num_pixels = simsize
         self.diameter = self.diameter_mode[self.mode] * mm
@@ -113,13 +152,13 @@ class MIRICruciform:
         self.x0 = np.linspace(-self.length / 2, self.length / 2, self.num_pixels)
         self.y0 = np.linspace(-self.length / 2, self.length / 2, self.num_pixels)
         self.distance_pupil_ar = self.focal_ratios[self.mode] - 0.2
-        self.filterfiles = {"F560W":filterpath+"JWST_MIRI.F560W.dat",
-                            "F770W": filterpath+"JWST_MIRI.F770W.dat",
+        self.filterfiles = {"F560W":str(filterpath / "JWST_MIRI.F560W.dat"),
+                            "F770W": str(filterpath / "JWST_MIRI.F770W.dat"),
                             "monochromatic": None}
         self.dispersion_angle = 0.
 
     def intialise_wavefront(self):
-        self.dispersion(target_wave=self.wavelength, mode=self.mode)
+        self.dispersion(target_wave=self.wavelength_um, mode=self.mode)
         self.u0 = Scalar_source_XY(x=self.x0, y=self.y0, wavelength=self.wavelength)
         self.t0 = Scalar_mask_XY(x=self.x0, y=self.y0, wavelength=self.wavelength)
         self.u0.plane_wave(theta=0.0 * degrees, phi=self.dispersion_angle * degrees)
@@ -191,9 +230,14 @@ class MIRICruciform:
         if mode == "MRS":
             self.dispersion_angle = 0.0
         elif mode in ["LRS-SLTSS", "LRS-SLT"]:
-            fl = self.focal_ratios[mode]*1e6 # in um            
-            central_wave = 8.4*um
-            self.dispersion_angle = ((target_wave*um-central_wave)*lrs_detector_dispersion(target_wave)*25*um/fl)/degrees
+            wavelength_um = np.asarray(target_wave, dtype=float)
+            fl = self.focal_ratios[mode] * 1e6 # in um
+            self.dispersion_angle = float(
+                lrs_slitless_dispersion_angle(
+                    wavelength=wavelength_um,
+                    focal_length_um=fl,
+                )
+            )
         else:
             self.dispersion_angle = 0.0
         return
@@ -209,7 +253,8 @@ class MIRICruciform:
 
 
     def monochromatic_webbpsf(self, wavelength=5.0, detector_angle=0):
-        self.wavelength = wavelength * um
+        self.wavelength_um = float(wavelength)
+        self.wavelength = self.wavelength_um * um
         self.intialise_wavefront()
 
         z0 = np.linspace(0 * mm, self.distance_pupil_ar * mm, 16)
@@ -234,7 +279,8 @@ class MIRICruciform:
 
     def monochromatic_cruciform(self, wavelength=5.0, a1=1., a2=0.6, a3=0.45, detector_angle=0.0, tr_radius=140.0,
                                 verbose=True, return_intensity=True):
-        self.wavelength = wavelength * um
+        self.wavelength_um = float(wavelength)
+        self.wavelength = self.wavelength_um * um
         self.intialise_wavefront()
         self.layer_absorption()
 
@@ -333,7 +379,14 @@ class MIRICruciform:
             uc2 += (ucruci2)
         return [ufc, uf, uc1, uc2]
     
-    def LRSsim(self, wavelengths=np.linspace(5,12,num=10), detector_angle=0.0, tr_radius=0.0):
+    def LRSsim(self, wavelengths=np.linspace(5,12,num=10), weights=None, detector_angle=0.0, tr_radius=0.0):
+        wavelengths = np.asarray(wavelengths, dtype=float)
+        if weights is None:
+            weights = np.ones_like(wavelengths)
+        else:
+            weights = np.asarray(weights, dtype=float)
+            if weights.shape != wavelengths.shape:
+                raise ValueError("weights must match wavelengths")
         n = len(wavelengths)
         ufc = 0
         uf = 0
@@ -345,11 +398,12 @@ class MIRICruciform:
             sys.stdout.write("[%-20s] %d%%" % ('=' * int(20 * j), 100 * j))
             sys.stdout.flush()
             utotal, uwebb, ucruci1, ucruci2 = self.monochromatic_cruciform(wavelength=wav, detector_angle=detector_angle,
-                                                                  tr_radius=tr_radius)
-            ufc += utotal  # transmission[i]* account for filter transmission
-            uf += uwebb
-            uc1 += (ucruci1)
-            uc2 += (ucruci2)
+                                                                   tr_radius=tr_radius)
+            weight = weights[i]
+            ufc += weight * utotal
+            uf += weight * uwebb
+            uc1 += weight * ucruci1
+            uc2 += weight * ucruci2
         return [ufc, uf, uc1, uc2]
     
     def plot_cruciform(self, components, filter, savepath=None, **kwargs):
@@ -369,7 +423,9 @@ class MIRICruciform:
         #     plt.savefig(savepath+f"MIRI_cruciformsim_{filter}.fits")
         # return
 
-    def save_simulation(self, components, path="/Users/polychronispatapis/Box/MIRI-COMM-Team/Sandbox/patapisp/DiffractionSimulations/simulations/", savename="MIRI_cruciformSim.fits", metadata=None):
+    def save_simulation(self, components, path="./simulations/", savename="MIRI_cruciformSim.fits", metadata=None):
+        output_dir = Path(path)
+        output_dir.mkdir(parents=True, exist_ok=True)
         primary_hdu = fits.PrimaryHDU(data=components[0])
         hdul = fits.HDUList(hdus=[primary_hdu])
         if len(components) >1:
@@ -379,15 +435,19 @@ class MIRICruciform:
         if metadata is not None:
             for k, v in metadata.items():
                 hdul[0].header[k] = v
-        if "filter" in metadata.keys():
+        if metadata is not None and "filter" in metadata.keys():
             savename = f"MIRI_cruciformsim_{metadata['filter']}_deta{metadata['dettilt']}deg_TIR{metadata['TIR']}um.fits"
-        hdul.writeto(path + savename, overwrite=True)
+        hdul.writeto(output_dir / savename, overwrite=True)
 
     def runsim(self, filter="F560W", wavelength_points=10, tr_radius=150, detector_angle=0.0, plot=True, save=True,
                savepath="./simulations/"):
         if 'LRS' in filter:
             print(f"Running Simulation for filter: {filter}")
-            psfs = self.LRSsim()
+            psfs = self.LRSsim(
+                wavelengths=np.linspace(5, 12, num=wavelength_points),
+                detector_angle=detector_angle,
+                tr_radius=tr_radius,
+            )
         elif filter in self.filterfiles.keys():
             print(f"Running Simulation for filter: {filter}")
             psfs = self.MIRIFilter(wavelength_points=wavelength_points, tr_radius=tr_radius, filter=filter,
@@ -412,8 +472,8 @@ class MIRICruciform:
 
 if __name__ == "__main__":
     mr = MIRICruciform(mode='LRS-SLTSS', 
-                       pupilfile="/Users/polychronispatapis/Documents/Projects/miripsf/miri_cruciform/data/JWpupil_segments_1024x1024.npy", 
-                       filterpath="/Users/polychronispatapis/Documents/Projects/miripsf/miri_cruciform/data/")
+                       pupilfile=DATA_DIR / "JWpupil_segments_1024x1024.npy", 
+                       filterpath=DATA_DIR)
     # psf = mr.monochromatic_cruciform()
     # # Start a timer to keep track of runtime
     time0 = time.perf_counter()
@@ -429,8 +489,5 @@ if __name__ == "__main__":
     # plt.figure()
     # plt.imshow((psf[3]), origin="lower", vmax=np.max(psf[3])*0.01)
     # plt.show()
-
-
-
 
 

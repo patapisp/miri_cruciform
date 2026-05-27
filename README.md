@@ -3,6 +3,8 @@ Simulation package of cruciform effect in MIRI detectors. The simulation uses ph
 
 Check paper by [Argyriou (2024)](https://ui.adsabs.harvard.edu/abs/2024SPIE13103E..1FA/abstract)
 
+For a slit-less LRS example using a simple stellar spectrum, see `LRS_slitless_demo.ipynb`.
+
 
 Detector model: 
 ![detector model](https://github.com/patapisp/miri_cruciform/blob/main/OpticalModel.png)
