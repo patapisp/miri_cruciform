@@ -20,7 +20,6 @@ from diffractio.scalar_sources_XY import Scalar_source_XY
 import matplotlib.cm as cm
 
 import time
-import os
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -144,6 +143,7 @@ class MIRICruciform:
         self.jwst_pupil = np.pad(jwst_pupil, padlen, mode='constant')
         # plt.figure()
         # plt.imshow(jwst_pupil, origin="lower")
+        self.wavelength_um = 5.0
         self.wavelength = 5.0 * um
         self.num_pixels = simsize
         self.diameter = self.diameter_mode[self.mode] * mm
@@ -158,7 +158,7 @@ class MIRICruciform:
         self.dispersion_angle = 0.
 
     def intialise_wavefront(self):
-        self.dispersion(target_wave=self.wavelength / um, mode=self.mode)
+        self.dispersion(target_wave=self.wavelength_um, mode=self.mode)
         self.u0 = Scalar_source_XY(x=self.x0, y=self.y0, wavelength=self.wavelength)
         self.t0 = Scalar_mask_XY(x=self.x0, y=self.y0, wavelength=self.wavelength)
         self.u0.plane_wave(theta=0.0 * degrees, phi=self.dispersion_angle * degrees)
@@ -253,7 +253,8 @@ class MIRICruciform:
 
 
     def monochromatic_webbpsf(self, wavelength=5.0, detector_angle=0):
-        self.wavelength = wavelength * um
+        self.wavelength_um = float(wavelength)
+        self.wavelength = self.wavelength_um * um
         self.intialise_wavefront()
 
         z0 = np.linspace(0 * mm, self.distance_pupil_ar * mm, 16)
@@ -278,7 +279,8 @@ class MIRICruciform:
 
     def monochromatic_cruciform(self, wavelength=5.0, a1=1., a2=0.6, a3=0.45, detector_angle=0.0, tr_radius=140.0,
                                 verbose=True, return_intensity=True):
-        self.wavelength = wavelength * um
+        self.wavelength_um = float(wavelength)
+        self.wavelength = self.wavelength_um * um
         self.intialise_wavefront()
         self.layer_absorption()
 
@@ -422,7 +424,8 @@ class MIRICruciform:
         # return
 
     def save_simulation(self, components, path="./simulations/", savename="MIRI_cruciformSim.fits", metadata=None):
-        os.makedirs(path, exist_ok=True)
+        output_dir = Path(path)
+        output_dir.mkdir(parents=True, exist_ok=True)
         primary_hdu = fits.PrimaryHDU(data=components[0])
         hdul = fits.HDUList(hdus=[primary_hdu])
         if len(components) >1:
@@ -434,7 +437,7 @@ class MIRICruciform:
                 hdul[0].header[k] = v
         if metadata is not None and "filter" in metadata.keys():
             savename = f"MIRI_cruciformsim_{metadata['filter']}_deta{metadata['dettilt']}deg_TIR{metadata['TIR']}um.fits"
-        hdul.writeto(path + savename, overwrite=True)
+        hdul.writeto(output_dir / savename, overwrite=True)
 
     def runsim(self, filter="F560W", wavelength_points=10, tr_radius=150, detector_angle=0.0, plot=True, save=True,
                savepath="./simulations/"):
@@ -486,6 +489,5 @@ if __name__ == "__main__":
     # plt.figure()
     # plt.imshow((psf[3]), origin="lower", vmax=np.max(psf[3])*0.01)
     # plt.show()
-
 
 
