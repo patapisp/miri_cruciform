@@ -8,7 +8,6 @@ from MIRI_cruciform_diffractio import (
     stellar_blackbody_spectrum,
     lrs_detector_offset_pixels,
     lrs_slitless_dispersion_angle,
-    um,
 )
 
 
@@ -25,7 +24,7 @@ class TestLRSSlitlessHelpers(unittest.TestCase):
         self.assertAlmostEqual(lrs_slitless_dispersion_angle(8.4, focal_length_um=7e6), 0.0, places=12)
 
         model = MIRICruciform(mode="LRS-SLTSS", simsize=1024)
-        model.dispersion(8.4 * um, mode="LRS-SLTSS")
+        model.dispersion(8.4, mode="LRS-SLTSS")
         self.assertAlmostEqual(model.dispersion_angle, 0.0, places=12)
 
     def test_lrs_dispersion_angle_grows_away_from_reference(self):
@@ -46,6 +45,7 @@ class TestLRSSlitlessHelpers(unittest.TestCase):
         model = object.__new__(MIRICruciform)
 
         def fake_monochromatic_cruciform(self, wavelength, detector_angle=0.0, tr_radius=0.0):
+            # Distinct per-component scalings make the weighted sum easy to verify.
             base = np.full((2, 2), wavelength)
             return base, base * 10, base * 100, base * 1000
 
@@ -59,6 +59,7 @@ class TestLRSSlitlessHelpers(unittest.TestCase):
             tr_radius=10.0,
         )
 
+        # 5.0 * 1.0 + 6.0 * 0.5 = 8.0, propagated through the component scalings above.
         np.testing.assert_allclose(components[0], np.full((2, 2), 8.0))
         np.testing.assert_allclose(components[1], np.full((2, 2), 80.0))
         np.testing.assert_allclose(components[2], np.full((2, 2), 800.0))

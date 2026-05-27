@@ -158,7 +158,7 @@ class MIRICruciform:
         self.dispersion_angle = 0.
 
     def intialise_wavefront(self):
-        self.dispersion(target_wave=self.wavelength, mode=self.mode)
+        self.dispersion(target_wave=self.wavelength / um, mode=self.mode)
         self.u0 = Scalar_source_XY(x=self.x0, y=self.y0, wavelength=self.wavelength)
         self.t0 = Scalar_mask_XY(x=self.x0, y=self.y0, wavelength=self.wavelength)
         self.u0.plane_wave(theta=0.0 * degrees, phi=self.dispersion_angle * degrees)
@@ -230,7 +230,7 @@ class MIRICruciform:
         if mode == "MRS":
             self.dispersion_angle = 0.0
         elif mode in ["LRS-SLTSS", "LRS-SLT"]:
-            wavelength_um = np.asarray(target_wave, dtype=float) / um
+            wavelength_um = np.asarray(target_wave, dtype=float)
             fl = self.focal_ratios[mode] * 1e6 # in um
             self.dispersion_angle = float(
                 lrs_slitless_dispersion_angle(
@@ -486,7 +486,6 @@ if __name__ == "__main__":
     # plt.figure()
     # plt.imshow((psf[3]), origin="lower", vmax=np.max(psf[3])*0.01)
     # plt.show()
-
 
 
 
